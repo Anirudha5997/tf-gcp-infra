@@ -1,0 +1,27 @@
+name: Terraform infra-gcp 
+on:
+ 
+  pull_request:
+    branches: [ "main" ]
+
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: tf-gcp-infra
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Terraform
+        run: |
+            wget -O- https://apt.releases.hashicorp.com/gpg 
+            gpg --dearmor 
+            sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg
+
+      - name: validate files
+        run: |
+            terraform init
+            terraform validate 
+            
