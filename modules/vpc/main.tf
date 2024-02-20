@@ -1,6 +1,5 @@
 resource "google_compute_network" "vpc_network" {
-  for_each                        = 
-  name                            = each.value.vpc_name
+  name                            = each.value.vpc_name;
   auto_create_subnetworks         = each.value.auto_create_subnets
   routing_mode                    = each.value.route_mode
   delete_default_routes_on_create = each.value.del_default_routes
