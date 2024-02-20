@@ -1,5 +1,5 @@
 resource "google_compute_network" "vpc_network" {
-  for_each                        = var
+  for_each                        = var.vpc
   name                            = each.value.vpc_name
   auto_create_subnetworks         = each.value.auto_create_subnets
   routing_mode                    = each.value.route_mode
