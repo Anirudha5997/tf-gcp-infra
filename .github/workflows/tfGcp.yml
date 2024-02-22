@@ -22,6 +22,7 @@ jobs:
 
       - name: validate files
         run: |
+            cd modules/vpc/
             terraform init
             terraform validate 
             
