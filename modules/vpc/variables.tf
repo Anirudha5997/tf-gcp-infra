@@ -18,32 +18,32 @@ variable "vpc" {
 
     firewalls = map(object({
       firewall_name = string
+      source_ranges = optional(list(string), [])
 
-      allow = list(object({
+      allow = optional(list(object({
         protocol = string
-        ports = list(string)
-      }))
-      
+        ports    = optional(list(string), [])
+      })), [])
+
+      deny = optional(list(object({
+        protocol = string
+        ports    = optional(list(string), [])
+      })), [])
       source_tags = list(string)
     }))
   }))
 }
 
-
-variable "service_account" {
-  type = object({
-    account_id = string
-    display_name = string
-  })
-}
-
 variable "vm-properties" {
-  description = "Configuration(s) for VMs"
+  description = "Configurations for VMs"
   type = map(object({
     name                = string
     machine_type        = string
     zone                = string
     can_ip_forward      = bool
+    deletion_protection = bool
+    enable_display      = bool
+    tags                = list(string)
 
 
     boot_disk = object({
@@ -58,14 +58,18 @@ variable "vm-properties" {
       })
     })
 
-    network_interface = map(object({
-      queue_count = number
-      stack_type  = string
-      subnetwork  = string
+    labels = object({
+      goog-ec-src = string
+    })
 
+
+    network_interface = map(object({
       access_config = object({
         network_tier = string
       })
+      queue_count = number
+      stack_type  = string
+      subnetwork  = string
     }))
 
     scheduling = map(object({
@@ -85,8 +89,5 @@ variable "vm-properties" {
       enable_secure_boot          = bool
       enable_vtpm                 = bool
     }))
-
   }))
 }
-
-
