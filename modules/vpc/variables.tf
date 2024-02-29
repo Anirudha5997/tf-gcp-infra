@@ -1,3 +1,15 @@
+variable "project_id" {
+  type = string
+}
+
+variable "region" {
+  type = string
+}
+
+variable "zone" {
+  type = string
+}
+
 variable "vpc" {
   type = map(object({
     vpc_name            = string
@@ -31,6 +43,47 @@ variable "vpc" {
       })), [])
       source_tags = list(string)
     }))
+
+    private_ip_alloc = optional(object({
+      name            = optional(string, "private-ip-alloc")
+      address_type    = optional(string, "INTERNAL")
+      purpose         = optional(string, "VPC_PEERING")
+      prefix_length   = optional(number, 24)
+    }), {})
+
+    databaseInstance = object({
+      name                = string
+      database_version    = string
+      deletion_protection = optional(bool, false)
+
+      settings = object({
+        tier              = string
+        edition           = optional(string, "ENTERPRISE")
+        disk_size         = optional(number, 100)
+        disk_type         = optional(string, "PD_SSD")
+        availability_type = optional(string, "REGIONAL")
+
+        ip_configuration = object({
+          ipv4_enabled = optional(bool, false)
+          # private_network = string
+          # allocated_ip_range = string
+          enable_private_path_for_google_cloud_services = optional(bool, false)
+        })
+
+        backup_configuration = object({
+          enabled                        = optional(bool, true)
+          point_in_time_recovery_enabled = optional(bool, true)
+        })
+      })
+
+      database = object({
+        name = optional(string, "webapp")
+      })
+
+      user = object({
+        name = optional(string, "webapp")
+      })
+    })
   }))
 }
 
@@ -44,7 +97,6 @@ variable "vm-properties" {
     deletion_protection = bool
     enable_display      = bool
     tags                = list(string)
-
 
     boot_disk = object({
       auto_delete = bool

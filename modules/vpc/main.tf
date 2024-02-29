@@ -1,3 +1,20 @@
+resource "random_password" "password" {
+  length    = 16
+  special   = false
+  min_upper = 2
+  min_lower = 7
+}
+
+# data "template_file" "startup_script_config" {
+#   template = file("${path.module}/startup_script.sh")
+#   vars = {
+#     database_host     = google_sql_database_instance.postgressInstance.ip_address[0].ip_address
+#     database_name     = google_sql_database.postgres.name
+#     database_password = random_password.password.result
+#     database_username = google_sql_database.postgres.username
+#   }
+# }
+
 resource "google_compute_network" "vpc_network" {
   for_each                        = var.vpc
   name                            = each.value.vpc_name
@@ -6,7 +23,6 @@ resource "google_compute_network" "vpc_network" {
   delete_default_routes_on_create = each.value.del_default_routes
   mtu                             = 1460
 }
-
 
 resource "google_compute_subnetwork" "subnet" {
   for_each = {
@@ -83,8 +99,41 @@ resource "google_compute_firewall" "firewall" {
   }
 }
 
+resource "google_compute_global_address" "private" {
+  for_each = {
+    for idx, config in flatten([
+      for vpc_name, config in var.vpc : flatten([for private_ip_alloc, private_ip_alloc_config in tolist([config.private_ip_alloc]) :
+        {
+          name          = private_ip_alloc_config.name
+          address_type  = private_ip_alloc_config.address_type
+          purpose       = private_ip_alloc_config.purpose
+          prefix_length = private_ip_alloc_config.prefix_length
+          network       = google_compute_network.vpc_network[vpc_name].id
+      }])
+    ]) : idx => config
+  }
+
+  name          = each.value.name
+  address_type  = each.value.address_type
+  purpose       = each.value.purpose
+  prefix_length = each.value.prefix_length
+  network       = each.value.network
+}
+
 resource "google_compute_instance" "vm" {
   for_each = var.vm-properties
+
+  metadata = {
+    startup-script = <<-EOT
+    #!/bin/bash
+    echo -e "HOST=${google_sql_database_instance.postgresInstance[0].ip_address[0].ip_address}\nDATABASE=${google_sql_database.postgres[0].name}\nPASSWORD=${random_password.password.result}\nPGUSER=${google_sql_user.user[0].name}\nDBPORT=5432" > /tmp/.env
+    sudo mv -f /tmp/.env /home/prodApp/.env
+    cd /home/prodApp
+    sudo /bin/bash bootstrap.sh
+    sudo chown -R csye6225:csye6225 /home/prodApp
+    sudo systemctl restart csye6225
+    EOT 
+  }
 
   name                = each.value.name
   machine_type        = each.value.machine_type
@@ -93,6 +142,12 @@ resource "google_compute_instance" "vm" {
   deletion_protection = each.value.deletion_protection
   enable_display      = each.value.enable_display
   tags                = each.value.tags
+  depends_on = [
+    google_compute_subnetwork.subnet,
+    google_sql_database_instance.postgresInstance,
+    google_sql_database.postgres,
+    google_sql_user.user
+  ]
 
   labels = each.value.labels
 
@@ -161,4 +216,112 @@ resource "google_compute_instance" "vm" {
       enable_vtpm                 = shielded_instance_config.value.enable_vtpm
     }
   }
+}
+
+resource "google_service_networking_connection" "private_vpc_connection" {
+  for_each = {
+    for idx, config in flatten([
+      for vpc_name, config in var.vpc : flatten([for private_ip_alloc, private_ip_alloc_config in config.private_ip_alloc :
+        {
+          network          = google_compute_network.vpc_network[vpc_name].id
+          reserved_peering = google_compute_global_address.private[0].name
+      }])
+    ]) : idx => config
+  }
+
+  network                 = each.value.network
+  service                 = "servicenetworking.googleapis.com"
+  reserved_peering_ranges = [each.value.reserved_peering]
+  deletion_policy         = "ABANDON"
+  depends_on              = [google_compute_network.vpc_network, google_compute_global_address.private]
+}
+
+resource "google_sql_database_instance" "postgresInstance" {
+  for_each = {
+    for idx, config in flatten([
+      for vpc_name, config in var.vpc : flatten([
+        for databaseInstance, databaseInstance_config in tolist([config.databaseInstance]) : {
+          vpc_name            = vpc_name
+          name                = databaseInstance_config.name
+          database_version    = databaseInstance_config.database_version
+          deletion_protection = databaseInstance_config.deletion_protection
+          settings            = databaseInstance_config.settings
+      }])
+    ]) : idx => config
+  }
+
+  name                = each.value.name
+  database_version    = each.value.database_version
+  depends_on          = [google_service_networking_connection.private_vpc_connection]
+  deletion_protection = each.value.deletion_protection
+
+  dynamic "settings" {
+    for_each = tolist([each.value.settings])
+    content {
+      tier              = settings.value.tier
+      edition           = settings.value.edition
+      disk_size         = settings.value.disk_size
+      disk_type         = settings.value.disk_type
+      availability_type = settings.value.availability_type
+      location_preference {
+        zone = var.zone
+      }
+
+      dynamic "ip_configuration" {
+        for_each = tolist([settings.value.ip_configuration])
+        content {
+          ipv4_enabled                                  = ip_configuration.value.ipv4_enabled
+          private_network                               = google_compute_network.vpc_network[each.value.vpc_name].id
+          enable_private_path_for_google_cloud_services = ip_configuration.value.enable_private_path_for_google_cloud_services
+        }
+      }
+
+      dynamic "backup_configuration" {
+        for_each = tolist([settings.value.backup_configuration])
+        content {
+          enabled                        = backup_configuration.value.enabled
+          point_in_time_recovery_enabled = backup_configuration.value.point_in_time_recovery_enabled
+        }
+      }
+    }
+  }
+}
+
+resource "google_sql_user" "user" {
+  for_each = {
+    for idx, config in flatten([
+      for vpc_name, config in var.vpc : flatten([
+        for databaseInstance, databaseInstance_config in tolist([config.databaseInstance]) : flatten([
+          for user, user_config in tolist([databaseInstance_config.user]) : {
+            name = user_config.name
+            # instance = user_config.instance
+            # host     = user_config.host
+            password = random_password.password.result
+      }])])
+    ]) : idx => config
+  }
+  name     = each.value.name
+  instance = google_sql_database_instance.postgresInstance[0].name
+  # host     = each.value.host
+  password   = each.value.password
+  depends_on = [google_sql_database_instance.postgresInstance]
+}
+
+resource "google_sql_database" "postgres" {
+  for_each = {
+    for idx, config in flatten([
+      for vpc_name, config in var.vpc : flatten([
+        for databaseInstance, databaseInstance_config in tolist([config.databaseInstance]) : flatten([
+          for database, database_config in tolist([databaseInstance_config.database]) : {
+            name = database_config.name
+      }])])
+    ]) : idx => config
+  }
+  name       = each.value.name
+  instance   = google_sql_database_instance.postgresInstance[0].name
+  depends_on = [google_sql_database_instance.postgresInstance]
+}
+
+locals {
+  timestamp_value = formatdate("YYYYMMDDhhmmss", timestamp())
 }
