@@ -45,10 +45,10 @@ variable "vpc" {
     }))
 
     private_ip_alloc = optional(object({
-      name            = optional(string, "private-ip-alloc")
-      address_type    = optional(string, "INTERNAL")
-      purpose         = optional(string, "VPC_PEERING")
-      prefix_length   = optional(number, 24)
+      name          = optional(string, "private-ip-alloc")
+      address_type  = optional(string, "INTERNAL")
+      purpose       = optional(string, "VPC_PEERING")
+      prefix_length = optional(number, 24)
     }), {})
 
     databaseInstance = object({
@@ -141,5 +141,31 @@ variable "vm-properties" {
       enable_secure_boot          = bool
       enable_vtpm                 = bool
     }))
+
+    cloud_dns_properties = map(object({
+      type = string
+      ttl  = number
+    }))
+
   }))
+}
+
+variable "manage_zone_name" {
+  type = string
+}
+
+variable "account_id" {
+  type = string
+}
+
+variable "display_name" {
+  type = string
+}
+
+variable "create_ignore_already_exists" {
+  type = bool
+}
+
+variable "iam_binding_roles" {
+  type = list(string)
 }

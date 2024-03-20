@@ -146,7 +146,8 @@ resource "google_compute_instance" "vm" {
     google_compute_subnetwork.subnet,
     google_sql_database_instance.postgresInstance,
     google_sql_database.postgres,
-    google_sql_user.user
+    google_sql_user.user,
+    google_service_account.service_account
   ]
 
   labels = each.value.labels
@@ -202,7 +203,7 @@ resource "google_compute_instance" "vm" {
     for_each = each.value.service_account
 
     content {
-      email  = service_account.value.email
+      email  = google_service_account.service_account.email
       scopes = service_account.value.scopes
     }
   }
@@ -324,4 +325,44 @@ resource "google_sql_database" "postgres" {
 
 locals {
   timestamp_value = formatdate("YYYYMMDDhhmmss", timestamp())
+}
+
+resource "google_dns_record_set" "a" {
+  for_each = {
+    for idx, config in flatten([
+      for vm_name, config in var.vm-properties : flatten([
+        for cloud_dns_properties, cloud_dns_properties_config in config.cloud_dns_properties :
+        {
+          type = cloud_dns_properties_config.type
+          ttl  = cloud_dns_properties_config.ttl
+          name = vm_name
+      }])
+    ]) : idx => config
+  }
+  name         = data.google_dns_managed_zone.prod.dns_name
+  managed_zone = data.google_dns_managed_zone.prod.name
+  type         = each.value.type
+  ttl          = each.value.ttl
+  rrdatas      = [google_compute_instance.vm[each.value.name].network_interface[0].access_config[0].nat_ip]
+  depends_on   = [google_compute_instance.vm]
+}
+
+data "google_dns_managed_zone" "prod" {
+  name = var.manage_zone_name
+}
+
+resource "google_service_account" "service_account" {
+  account_id                   = var.account_id
+  display_name                 = var.display_name
+  create_ignore_already_exists = var.create_ignore_already_exists
+}
+
+resource "google_project_iam_binding" "project_roles" {
+  project  = var.project_id
+  for_each = toset(var.iam_binding_roles)
+  role     = each.key
+
+  members = [
+    "serviceAccount:${google_service_account.service_account.email}",
+  ]
 }
