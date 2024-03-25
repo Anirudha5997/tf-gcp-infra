@@ -327,7 +327,7 @@ locals {
   timestamp_value = formatdate("YYYYMMDDhhmmss", timestamp())
 }
 
-resource "google_dns_record_set" "a" {
+resource "google_dns_record_set" "DNSrecords" {
   for_each = {
     for idx, config in flatten([
       for vm_name, config in var.vm-properties : flatten([
@@ -336,15 +336,18 @@ resource "google_dns_record_set" "a" {
           type = cloud_dns_properties_config.type
           ttl  = cloud_dns_properties_config.ttl
           name = vm_name
+          dns_record_name = cloud_dns_properties_config.dns_record_name
+          rrdatas = cloud_dns_properties_config.rrdatas
       }])
     ]) : idx => config
   }
-  name         = data.google_dns_managed_zone.prod.dns_name
+  
+  name         = each.value.dns_record_name == "" ? data.google_dns_managed_zone.prod.dns_name : each.value.dns_record_name 
   managed_zone = data.google_dns_managed_zone.prod.name
   type         = each.value.type
   ttl          = each.value.ttl
-  rrdatas      = [google_compute_instance.vm[each.value.name].network_interface[0].access_config[0].nat_ip]
-  depends_on   = [google_compute_instance.vm]
+  rrdatas      = each.value.type == "A" ? [google_compute_instance.vm[each.value.name].network_interface[0].access_config[0].nat_ip] : each.value.rrdatas
+  depends_on   = [google_compute_instance.vm, ]
 }
 
 data "google_dns_managed_zone" "prod" {

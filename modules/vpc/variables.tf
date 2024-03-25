@@ -144,7 +144,9 @@ variable "vm-properties" {
 
     cloud_dns_properties = map(object({
       type = string
+      dns_record_name = optional(string, "")
       ttl  = number
+      rrdatas = optional(list(string), [])
     }))
 
   }))
