@@ -15,3 +15,14 @@
 ### "terraform plan -var-file="../../dev.auto.tfvars" to generate plan from tfvars file
 ### terraform apply -var-file="../../dev.auto.tfvars" to apply the generate the infrastrucutre
 ### terraform apply -var-file="../../dev.auto.tfvars" to destroy the infra
+
+## Gcloud Project and account setting
+### gcloud init
+### gcloud auth login
+### gcloud config set project "project_id"
+### gcloud auth application default login
+
+## Setting up GOOGLE_APPLICATION_CREDENTIAL 
+### go to directory containing json.creds
+### export GOOGLE_APPLICATION_CREDENTIAL=`pwd`/json.creds_file
+### echo $GOOGLE_APPLICATION_CREDENTIAL 
