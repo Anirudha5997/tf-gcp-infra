@@ -5,16 +5,6 @@ resource "random_password" "password" {
   min_lower = 7
 }
 
-# data "template_file" "startup_script_config" {
-#   template = file("${path.module}/startup_script.sh")
-#   vars = {
-#     database_host     = google_sql_database_instance.postgressInstance.ip_address[0].ip_address
-#     database_name     = google_sql_database.postgres.name
-#     database_password = random_password.password.result
-#     database_username = google_sql_database.postgres.username
-#   }
-# }
-
 resource "google_compute_network" "vpc_network" {
   for_each                        = var.vpc
   name                            = each.value.vpc_name
@@ -39,6 +29,52 @@ resource "google_compute_subnetwork" "subnet" {
   name          = each.value.subnet_name
   ip_cidr_range = each.value.cidr_range
   network       = each.value.network
+}
+
+resource "google_vpc_access_connector" "vpc_connector" {
+  for_each = {
+    for idx, config in flatten([
+      for vpc_name, config in var.vpc : flatten([
+        for vpc_connector, vpc_connector_config in tolist([config.vpc_connector]) : {
+          name          = vpc_connector_config.name
+          ip_cidr_range = vpc_connector_config.ip_cidr_range
+          machine_type  = vpc_connector_config.machine_type
+          min_instances = vpc_connector_config.min_instances
+          max_instances = vpc_connector_config.max_instances
+          network       = google_compute_network.vpc_network[vpc_name].id
+      }])
+    ]) : idx => config
+  }
+  name          = each.value.name
+  ip_cidr_range = each.value.ip_cidr_range
+  machine_type  = each.value.machine_type
+  min_instances = each.value.min_instances
+  max_instances = each.value.max_instances
+  network       = each.value.network
+  depends_on    = [google_compute_network.vpc_network]
+}
+
+resource "google_compute_network_peering_routes_config" "peering_primary_routes" {
+  for_each = {
+    for idx, config in flatten([
+      for vpc_name, config in var.vpc : flatten([
+        for private_ip_alloc, private_ip_alloc_config in tolist([config.private_ip_alloc]) : flatten([
+          for vpc_connector_peering_routes, vpc_connector_peering_routes_config in tolist([private_ip_alloc_config.vpc_connector_peering_routes]) :
+          {
+            import_custom_routes = vpc_connector_peering_routes_config.import_custom_routes
+            export_custom_routes = vpc_connector_peering_routes_config.export_custom_routes
+            network              = vpc_name
+            peering              = private_ip_alloc_config
+          }
+      ])])
+    ]) : idx => config
+  }
+  peering = google_service_networking_connection.private_vpc_connection[0].peering
+  network = google_compute_network.vpc_network[each.value.network].name
+
+  import_custom_routes = each.value.import_custom_routes
+  export_custom_routes = each.value.export_custom_routes
+  depends_on           = [google_service_networking_connection.private_vpc_connection, google_compute_network.vpc_network]
 }
 
 resource "google_compute_route" "route" {
@@ -126,7 +162,7 @@ resource "google_compute_instance" "vm" {
   metadata = {
     startup-script = <<-EOT
     #!/bin/bash
-    echo -e "HOST=${google_sql_database_instance.postgresInstance[0].ip_address[0].ip_address}\nDATABASE=${google_sql_database.postgres[0].name}\nPASSWORD=${random_password.password.result}\nPGUSER=${google_sql_user.user[0].name}\nDBPORT=5432" > /tmp/.env
+    echo -e "GCP_PROJECT_ID=${var.project_id}\nGCP_TOPIC=${google_pubsub_topic.topic_tf.name}\nHOST=${google_sql_database_instance.postgresInstance[0].ip_address[0].ip_address}\nDATABASE=${google_sql_database.postgres[0].name}\nPASSWORD=${random_password.password.result}\nPGUSER=${google_sql_user.user[0].name}\nDBPORT=5432" > /tmp/.env
     sudo mv -f /tmp/.env /home/prodApp/.env
     cd /home/prodApp
     sudo /bin/bash bootstrap.sh
@@ -203,7 +239,7 @@ resource "google_compute_instance" "vm" {
     for_each = each.value.service_account
 
     content {
-      email  = google_service_account.service_account.email
+      email  = google_service_account.service_account[service_account.value.service_account_name].email
       scopes = service_account.value.scopes
     }
   }
@@ -222,7 +258,7 @@ resource "google_compute_instance" "vm" {
 resource "google_service_networking_connection" "private_vpc_connection" {
   for_each = {
     for idx, config in flatten([
-      for vpc_name, config in var.vpc : flatten([for private_ip_alloc, private_ip_alloc_config in config.private_ip_alloc :
+      for vpc_name, config in var.vpc : flatten([for private_ip_alloc, private_ip_alloc_config in tolist([config.private_ip_alloc]) :
         {
           network          = google_compute_network.vpc_network[vpc_name].id
           reserved_peering = google_compute_global_address.private[0].name
@@ -323,31 +359,27 @@ resource "google_sql_database" "postgres" {
   depends_on = [google_sql_database_instance.postgresInstance]
 }
 
-locals {
-  timestamp_value = formatdate("YYYYMMDDhhmmss", timestamp())
-}
-
 resource "google_dns_record_set" "DNSrecords" {
   for_each = {
     for idx, config in flatten([
       for vm_name, config in var.vm-properties : flatten([
         for cloud_dns_properties, cloud_dns_properties_config in config.cloud_dns_properties :
         {
-          type = cloud_dns_properties_config.type
-          ttl  = cloud_dns_properties_config.ttl
-          name = vm_name
+          type            = cloud_dns_properties_config.type
+          ttl             = cloud_dns_properties_config.ttl
+          name            = vm_name
           dns_record_name = cloud_dns_properties_config.dns_record_name
-          rrdatas = cloud_dns_properties_config.rrdatas
+          rrdatas         = cloud_dns_properties_config.rrdatas
       }])
     ]) : idx => config
   }
-  
-  name         = each.value.dns_record_name == "" ? data.google_dns_managed_zone.prod.dns_name : each.value.dns_record_name 
+
+  name         = each.value.dns_record_name == "" ? data.google_dns_managed_zone.prod.dns_name : each.value.dns_record_name
   managed_zone = data.google_dns_managed_zone.prod.name
   type         = each.value.type
   ttl          = each.value.ttl
   rrdatas      = each.value.type == "A" ? [google_compute_instance.vm[each.value.name].network_interface[0].access_config[0].nat_ip] : each.value.rrdatas
-  depends_on   = [google_compute_instance.vm, ]
+  depends_on   = [google_compute_instance.vm]
 }
 
 data "google_dns_managed_zone" "prod" {
@@ -355,17 +387,121 @@ data "google_dns_managed_zone" "prod" {
 }
 
 resource "google_service_account" "service_account" {
-  account_id                   = var.account_id
-  display_name                 = var.display_name
-  create_ignore_already_exists = var.create_ignore_already_exists
+  for_each                     = var.service_accounts_properties
+  account_id                   = each.value.account_id
+  display_name                 = each.value.display_name
+  create_ignore_already_exists = each.value.create_ignore_already_exists
 }
 
 resource "google_project_iam_binding" "project_roles" {
-  project  = var.project_id
-  for_each = toset(var.iam_binding_roles)
-  role     = each.key
+  for_each = {
+    for idx, config in flatten([
+      for service_acc, service_acc_config in var.service_accounts_properties : flatten([
+        for iam_role in service_acc_config.iam_binding_roles : {
+          role            = iam_role
+          service_account = service_acc
+        }
+      ])
+    ]) : idx => config
+  }
+
+  project    = var.project_id
+  role       = each.value.role
+  depends_on = [google_service_account.service_account]
 
   members = [
-    "serviceAccount:${google_service_account.service_account.email}",
+    "serviceAccount:${google_service_account.service_account[each.value.service_account].email}",
   ]
+}
+
+resource "google_pubsub_topic" "topic_tf" {
+  name = var.pubsub_topic_name
+  labels = {
+    pubsubtopic = "pubsubtopic"
+  }
+}
+
+resource "google_pubsub_subscription" "pull_sub" {
+  for_each = var.pubsub_pull_subscription
+  name     = each.value.name
+  topic    = google_pubsub_topic.topic_tf.id
+
+  labels = {
+    pbsubscription = "pbsubscription"
+  }
+
+  # 7 Days
+  message_retention_duration = each.value.message_retention_duration
+  retain_acked_messages      = each.value.retain_acked_messages
+
+  ack_deadline_seconds    = each.value.ack_deadline_seconds
+  enable_message_ordering = each.value.enable_message_ordering
+}
+
+data "google_storage_bucket" "cloud_bucket" {
+  name = var.cloud_bucket_name
+}
+
+data "google_storage_bucket_object" "archive" {
+  name   = var.archive_name
+  bucket = data.google_storage_bucket.cloud_bucket.name
+}
+
+resource "google_cloudfunctions2_function" "function" {
+  for_each    = var.cloud_function_properties
+  name        = each.value.name
+  location    = each.value.location
+  description = each.value.description
+  depends_on  = [google_service_account.service_account, google_sql_database_instance.postgresInstance, google_sql_database.postgres, random_password.password, google_sql_user.user]
+
+  dynamic "build_config" {
+    for_each = tolist([each.value.build_config])
+    content {
+      runtime     = build_config.value.runtime
+      entry_point = build_config.value.entry_point #check correct entry point
+      source {
+        storage_source {
+          bucket = data.google_storage_bucket.cloud_bucket.name
+          object = data.google_storage_bucket_object.archive.name
+        }
+      }
+    }
+  }
+
+  dynamic "service_config" {
+    for_each = tolist([each.value.service_config])
+    content {
+      max_instance_count             = service_config.value.max_instance_count
+      min_instance_count             = service_config.value.min_instance_count
+      available_memory               = service_config.value.available_memory
+      timeout_seconds                = service_config.value.timeout_seconds
+      environment_variables          = merge(service_config.value.environment_variables, local.cloud_function_environmental_variables)
+      ingress_settings               = service_config.value.ingress_settings
+      all_traffic_on_latest_revision = service_config.value.all_traffic_on_latest_revision
+      service_account_email          = google_service_account.service_account[service_config.value.service_account_email].email
+      vpc_connector                  = google_vpc_access_connector.vpc_connector[service_config.value.vpc_connector].name
+      vpc_connector_egress_settings  = service_config.value.vpc_connector_egress_settings
+    }
+  }
+
+  dynamic "event_trigger" {
+    for_each = tolist([each.value.event_trigger])
+    content {
+      trigger_region = event_trigger.value.trigger_region
+      event_type     = event_trigger.value.event_type
+      pubsub_topic   = google_pubsub_topic.topic_tf.id
+      retry_policy   = event_trigger.value.retry_policy
+    }
+  }
+}
+
+locals {
+  timestamp_value = formatdate("YYYYMMDDhhmmss", timestamp())
+  cloud_function_environmental_variables = {
+    HOST     = google_sql_database_instance.postgresInstance[0].ip_address[0].ip_address
+    DATABASE = google_sql_database.postgres[0].name
+    PASSWORD = random_password.password.result
+    PGUSER   = google_sql_user.user[0].name
+    DBPORT   = 5432
+  }
 }

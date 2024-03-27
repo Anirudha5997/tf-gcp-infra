@@ -22,6 +22,14 @@ variable "vpc" {
       cidr_range  = string
     }))
 
+    vpc_connector = object({
+      name          = string
+      ip_cidr_range = string
+      machine_type  = string
+      min_instances = number
+      max_instances = number
+    })
+
     routes = map(object({
       route_name        = string
       destination_range = string
@@ -44,12 +52,17 @@ variable "vpc" {
       source_tags = list(string)
     }))
 
-    private_ip_alloc = optional(object({
+    private_ip_alloc = object({
       name          = optional(string, "private-ip-alloc")
       address_type  = optional(string, "INTERNAL")
       purpose       = optional(string, "VPC_PEERING")
       prefix_length = optional(number, 24)
-    }), {})
+
+      vpc_connector_peering_routes = object({
+        import_custom_routes = bool
+        export_custom_routes = bool
+      })
+    })
 
     databaseInstance = object({
       name                = string
@@ -132,8 +145,9 @@ variable "vm-properties" {
     }))
 
     service_account = map(object({
-      email  = string
-      scopes = list(string)
+      email                = string
+      service_account_name = string
+      scopes               = list(string)
     }))
 
     shielded_instance_config = map(object({
@@ -143,10 +157,10 @@ variable "vm-properties" {
     }))
 
     cloud_dns_properties = map(object({
-      type = string
+      type            = string
       dns_record_name = optional(string, "")
-      ttl  = number
-      rrdatas = optional(list(string), [])
+      ttl             = number
+      rrdatas         = optional(list(string), [])
     }))
 
   }))
@@ -156,18 +170,67 @@ variable "manage_zone_name" {
   type = string
 }
 
-variable "account_id" {
+variable "service_accounts_properties" {
+  type = map(object({
+    account_id                   = string
+    display_name                 = string
+    create_ignore_already_exists = bool
+    iam_binding_roles            = list(string)
+  }))
+}
+
+variable "cloud_bucket_name" {
   type = string
 }
 
-variable "display_name" {
+variable "archive_name" {
   type = string
 }
 
-variable "create_ignore_already_exists" {
-  type = bool
+variable "pubsub_topic_name" {
+  type = string
 }
 
-variable "iam_binding_roles" {
-  type = list(string)
+variable "pubsub_pull_subscription" {
+  type = map(object({
+    name                       = string
+    message_retention_duration = string
+    retain_acked_messages      = bool
+    ack_deadline_seconds       = optional(number, 120)
+    enable_message_ordering    = bool
+  }))
+}
+
+variable "cloud_function_properties" {
+  type = map(object({
+    name        = string
+    location    = string
+    description = string
+
+    build_config = object({
+      runtime     = string
+      entry_point = string
+    })
+
+    service_config = object({
+      max_instance_count = number
+      min_instance_count = number
+      available_memory   = string
+      timeout_seconds    = number
+
+      environment_variables = map(string)
+
+      ingress_settings               = string
+      all_traffic_on_latest_revision = bool
+      service_account_email          = string
+      vpc_connector_egress_settings  = string
+      vpc_connector                  = number
+    })
+
+    event_trigger = object({
+      trigger_region = string
+      event_type     = string
+      retry_policy   = string
+    })
+  }))
 }
