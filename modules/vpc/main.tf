@@ -22,6 +22,8 @@ resource "google_compute_subnetwork" "subnet" {
           subnet_name = subnet_config.subnet_name
           cidr_range  = subnet_config.cidr_range
           network     = google_compute_network.vpc_network[vpc_name].id
+          purpose     = subnet_config.purpose
+          role        = subnet_config.role
       }])
 
     ]) : idx => config
@@ -29,6 +31,8 @@ resource "google_compute_subnetwork" "subnet" {
   name          = each.value.subnet_name
   ip_cidr_range = each.value.cidr_range
   network       = each.value.network
+  purpose       = each.value.purpose
+  role          = each.value.role
 }
 
 resource "google_vpc_access_connector" "vpc_connector" {
@@ -156,105 +160,6 @@ resource "google_compute_global_address" "private" {
   network       = each.value.network
 }
 
-resource "google_compute_instance" "vm" {
-  for_each = var.vm-properties
-
-  metadata = {
-    startup-script = <<-EOT
-    #!/bin/bash
-    echo -e "GCP_PROJECT_ID=${var.project_id}\nGCP_TOPIC=${google_pubsub_topic.topic_tf.name}\nHOST=${google_sql_database_instance.postgresInstance[0].ip_address[0].ip_address}\nDATABASE=${google_sql_database.postgres[0].name}\nPASSWORD=${random_password.password.result}\nPGUSER=${google_sql_user.user[0].name}\nDBPORT=5432" > /tmp/.env
-    sudo mv -f /tmp/.env /home/prodApp/.env
-    cd /home/prodApp
-    sudo /bin/bash bootstrap.sh
-    sudo chown -R csye6225:csye6225 /home/prodApp
-    sudo systemctl restart csye6225
-    EOT 
-  }
-
-  name                = each.value.name
-  machine_type        = each.value.machine_type
-  zone                = each.value.zone
-  can_ip_forward      = each.value.can_ip_forward
-  deletion_protection = each.value.deletion_protection
-  enable_display      = each.value.enable_display
-  tags                = each.value.tags
-  depends_on = [
-    google_compute_subnetwork.subnet,
-    google_sql_database_instance.postgresInstance,
-    google_sql_database.postgres,
-    google_sql_user.user,
-    google_service_account.service_account
-  ]
-
-  labels = each.value.labels
-
-  dynamic "boot_disk" {
-    for_each = tolist([each.value.boot_disk])
-
-    content {
-      auto_delete = boot_disk.value.auto_delete
-      device_name = boot_disk.value.device_name
-      mode        = boot_disk.value.mode
-
-      dynamic "initialize_params" {
-        for_each = tolist([boot_disk.value.initialize_params])
-
-        content {
-          image = initialize_params.value.image
-          size  = initialize_params.value.size
-          type  = initialize_params.value.type
-        }
-      }
-    }
-  }
-
-  dynamic "network_interface" {
-    for_each = each.value.network_interface
-    content {
-      dynamic "access_config" {
-        for_each = tolist([network_interface.value.access_config])
-        content {
-          network_tier = access_config.value.network_tier
-        }
-      }
-
-      queue_count = network_interface.value.queue_count
-      stack_type  = network_interface.value.stack_type
-      subnetwork  = network_interface.value.subnetwork
-    }
-  }
-
-  dynamic "scheduling" {
-    for_each = each.value.scheduling
-
-    content {
-      automatic_restart   = scheduling.value.automatic_restart
-      on_host_maintenance = scheduling.value.on_host_maintenance
-      preemptible         = scheduling.value.preemptible
-      provisioning_model  = scheduling.value.provisioning_model
-    }
-  }
-
-  dynamic "service_account" {
-    for_each = each.value.service_account
-
-    content {
-      email  = google_service_account.service_account[service_account.value.service_account_name].email
-      scopes = service_account.value.scopes
-    }
-  }
-
-  dynamic "shielded_instance_config" {
-    for_each = each.value.shielded_instance_config
-
-    content {
-      enable_integrity_monitoring = shielded_instance_config.value.enable_integrity_monitoring
-      enable_secure_boot          = shielded_instance_config.value.enable_secure_boot
-      enable_vtpm                 = shielded_instance_config.value.enable_vtpm
-    }
-  }
-}
-
 resource "google_service_networking_connection" "private_vpc_connection" {
   for_each = {
     for idx, config in flatten([
@@ -357,29 +262,6 @@ resource "google_sql_database" "postgres" {
   name       = each.value.name
   instance   = google_sql_database_instance.postgresInstance[0].name
   depends_on = [google_sql_database_instance.postgresInstance]
-}
-
-resource "google_dns_record_set" "DNSrecords" {
-  for_each = {
-    for idx, config in flatten([
-      for vm_name, config in var.vm-properties : flatten([
-        for cloud_dns_properties, cloud_dns_properties_config in config.cloud_dns_properties :
-        {
-          type            = cloud_dns_properties_config.type
-          ttl             = cloud_dns_properties_config.ttl
-          name            = vm_name
-          dns_record_name = cloud_dns_properties_config.dns_record_name
-          rrdatas         = cloud_dns_properties_config.rrdatas
-      }])
-    ]) : idx => config
-  }
-
-  name         = each.value.dns_record_name == "" ? data.google_dns_managed_zone.prod.dns_name : each.value.dns_record_name
-  managed_zone = data.google_dns_managed_zone.prod.name
-  type         = each.value.type
-  ttl          = each.value.ttl
-  rrdatas      = each.value.type == "A" ? [google_compute_instance.vm[each.value.name].network_interface[0].access_config[0].nat_ip] : each.value.rrdatas
-  depends_on   = [google_compute_instance.vm]
 }
 
 data "google_dns_managed_zone" "prod" {
@@ -504,4 +386,278 @@ locals {
     PGUSER   = google_sql_user.user[0].name
     DBPORT   = 5432
   }
+}
+
+resource "google_dns_record_set" "DNSrecords" {
+  for_each = {
+    for idx, config in flatten([
+      for vm_name, config in var.webapp_instance_template_properties : flatten([
+        for cloud_dns_properties, cloud_dns_properties_config in config.cloud_dns_properties :
+        {
+          type            = cloud_dns_properties_config.type
+          ttl             = cloud_dns_properties_config.ttl
+          name            = vm_name
+          dns_record_name = cloud_dns_properties_config.dns_record_name
+          rrdatas         = cloud_dns_properties_config.rrdatas
+      }])
+    ]) : idx => config
+  }
+
+  name         = each.value.dns_record_name == "" ? data.google_dns_managed_zone.prod.dns_name : each.value.dns_record_name
+  managed_zone = data.google_dns_managed_zone.prod.name
+  type         = each.value.type
+  ttl          = each.value.ttl
+  rrdatas      = each.value.type == "A" ? [google_compute_global_forwarding_rule.google_compute_forwarding_rule.ip_address] : each.value.rrdatas
+  depends_on   = [google_compute_global_forwarding_rule.google_compute_forwarding_rule]
+}
+
+resource "google_compute_region_instance_template" "webapp_instance_template" {
+  for_each    = var.webapp_instance_template_properties
+  name        = each.value.name
+  description = each.value.description
+  # instance_description = "description assigned to instances"
+  region         = each.value.region
+  machine_type   = each.value.machine_type
+  can_ip_forward = each.value.can_ip_forward
+  tags           = each.value.tags
+  labels         = each.value.labels
+
+  depends_on = [
+    google_compute_subnetwork.subnet,
+    google_sql_database_instance.postgresInstance,
+    google_sql_database.postgres,
+    google_sql_user.user,
+    google_service_account.service_account
+  ]
+  metadata = {
+    startup-script = <<-EOT
+    #!/bin/bash
+    echo -e "GCP_PROJECT_ID=${var.project_id}\nGCP_TOPIC=${google_pubsub_topic.topic_tf.name}\nHOST=${google_sql_database_instance.postgresInstance[0].ip_address[0].ip_address}\nDATABASE=${google_sql_database.postgres[0].name}\nPASSWORD=${random_password.password.result}\nPGUSER=${google_sql_user.user[0].name}\nDBPORT=5432" > /tmp/.env
+    sudo mv -f /tmp/.env /home/prodApp/.env
+    cd /home/prodApp
+    sudo /bin/bash bootstrap.sh
+    sudo chown -R csye6225:csye6225 /home/prodApp
+    sudo systemctl restart csye6225
+    EOT 
+  }
+
+  dynamic "disk" {
+    for_each = tolist([each.value.disk])
+
+    content {
+      auto_delete  = disk.value.auto_delete
+      device_name  = disk.value.device_name
+      mode         = disk.value.mode
+      source_image = disk.value.source_image
+      disk_type    = disk.value.disk_type
+      disk_size_gb = disk.value.disk_size_gb
+    }
+  }
+
+  dynamic "network_interface" {
+    for_each = each.value.network_interface
+    content {
+      dynamic "access_config" {
+        for_each = tolist([network_interface.value.access_config])
+        content {
+          network_tier = access_config.value.network_tier
+        }
+      }
+
+      queue_count = network_interface.value.queue_count
+      stack_type  = network_interface.value.stack_type
+      subnetwork  = network_interface.value.subnetwork
+    }
+  }
+
+  dynamic "scheduling" {
+    for_each = each.value.scheduling
+
+    content {
+      automatic_restart   = scheduling.value.automatic_restart
+      on_host_maintenance = scheduling.value.on_host_maintenance
+      preemptible         = scheduling.value.preemptible
+      provisioning_model  = scheduling.value.provisioning_model
+    }
+  }
+
+  dynamic "service_account" {
+    for_each = each.value.service_account
+    content {
+      email  = google_service_account.service_account[service_account.value.service_account_name].email
+      scopes = service_account.value.scopes
+    }
+  }
+
+  dynamic "shielded_instance_config" {
+    for_each = each.value.shielded_instance_config
+
+    content {
+      enable_integrity_monitoring = shielded_instance_config.value.enable_integrity_monitoring
+      enable_secure_boot          = shielded_instance_config.value.enable_secure_boot
+      enable_vtpm                 = shielded_instance_config.value.enable_vtpm
+    }
+  }
+}
+
+resource "google_compute_health_check" "health_check" {
+  for_each            = var.health_check
+  name                = each.value.name
+  description         = each.value.description
+  timeout_sec         = each.value.timeout_sec
+  check_interval_sec  = each.value.check_interval_sec
+  healthy_threshold   = each.value.healthy_threshold
+  unhealthy_threshold = each.value.unhealthy_threshold
+
+  dynamic "http_health_check" {
+    for_each = tolist([each.value.http_health_check])
+    content {
+      port         = http_health_check.value.port
+      request_path = http_health_check.value.request_path
+      proxy_header = http_health_check.value.proxy_header
+    }
+  }
+}
+
+resource "google_compute_target_pool" "target_pool" {
+  name    = var.pool_name
+  project = var.project_id
+}
+resource "google_compute_region_instance_group_manager" "group_manager" {
+  for_each                  = var.group_manager
+  name                      = each.value.name
+  base_instance_name        = each.value.base_instance_name
+  region                    = each.value.region
+  distribution_policy_zones = each.value.distribution_policy_zones
+  depends_on = [
+    google_compute_region_instance_template.webapp_instance_template,
+    google_compute_target_pool.target_pool,
+    google_compute_health_check.health_check
+  ]
+
+  version {
+    instance_template = google_compute_region_instance_template.webapp_instance_template["vm1"].self_link
+  }
+
+  all_instances_config {
+    labels = {
+      igm = "igm-label"
+    }
+  }
+
+  target_pools = [google_compute_target_pool.target_pool.id]
+  target_size  = each.value.target_size
+
+  dynamic "named_port" {
+    for_each = tolist([each.value.named_port])
+    content {
+      name = named_port.value.name
+      port = named_port.value.port
+    }
+  }
+
+  dynamic "auto_healing_policies" {
+    for_each = tolist([each.value.auto_healing_policies])
+    content {
+      health_check      = google_compute_health_check.health_check["health_check1"].id
+      initial_delay_sec = auto_healing_policies.value.initial_delay_sec
+    }
+  }
+}
+
+resource "google_compute_region_autoscaler" "autoscaler" {
+  for_each   = var.autoscaler
+  name       = each.value.name
+  region     = each.value.region
+  target     = google_compute_region_instance_group_manager.group_manager["group_manager1"].id
+  depends_on = [google_compute_region_instance_group_manager.group_manager]
+
+  dynamic "autoscaling_policy" {
+    for_each = tolist([each.value.autoscaling_policy])
+    content {
+      max_replicas    = autoscaling_policy.value.max_replicas
+      min_replicas    = autoscaling_policy.value.min_replicas
+      cooldown_period = autoscaling_policy.value.cooldown_period
+      dynamic "cpu_utilization" {
+        for_each = tolist([autoscaling_policy.value.cpu_utilization])
+        content {
+          target = cpu_utilization.value.target
+        }
+      }
+    }
+  }
+}
+
+###################### EXTERNAL LOAD BALANCER ###########################
+resource "google_compute_target_https_proxy" "target_proxy" {
+  name             = var.target_proxy_name
+  url_map          = google_compute_url_map.url_mapper.id
+  ssl_certificates = [google_compute_managed_ssl_certificate.ssl_cert.id]
+  depends_on = [
+    google_compute_url_map.url_mapper,
+    google_compute_managed_ssl_certificate.ssl_cert
+  ]
+}
+
+resource "google_compute_managed_ssl_certificate" "ssl_cert" {
+  name = var.ssl_cert_name
+  managed {
+    domains = var.ssl_domain
+  }
+}
+
+resource "google_compute_url_map" "url_mapper" {
+  name            = var.url_mapper
+  default_service = google_compute_backend_service.backend_service["backend_service1"].id
+  depends_on      = [google_compute_backend_service.backend_service]
+}
+
+resource "google_compute_backend_service" "backend_service" {
+  for_each              = var.backend_service
+  name                  = each.value.name
+  project               = var.project_id
+  provider              = google-beta
+  port_name             = each.value.port_name
+  protocol              = each.value.protocol
+  load_balancing_scheme = each.value.load_balancing_scheme
+  locality_lb_policy    = each.value.locality_lb_policy
+
+  depends_on = [
+    google_compute_region_instance_group_manager.group_manager,
+    google_compute_health_check.health_check
+  ]
+
+  dynamic "backend" {
+    for_each = tolist([each.value.backend])
+    content {
+      balancing_mode  = backend.value.balancing_mode
+      group           = google_compute_region_instance_group_manager.group_manager["group_manager1"].instance_group
+      capacity_scaler = backend.value.capacity_scaler
+      max_utilization = backend.value.max_utilization
+    }
+  }
+
+  health_checks = [google_compute_health_check.health_check["health_check1"].id]
+  dynamic "log_config" {
+    for_each = tolist([each.value.log_config])
+    content {
+      enable = log_config.value.enable
+    }
+  }
+}
+
+resource "google_compute_global_forwarding_rule" "google_compute_forwarding_rule" {
+  name                  = var.ext_lb_name
+  ip_protocol           = var.ext_lb_ip_protocol
+  load_balancing_scheme = var.ext_lb_scheme
+  port_range            = var.ext_lb_port_range
+  target                = google_compute_target_https_proxy.target_proxy.id
+
+  # network               = google_compute_network.vpc_network.id 
+  # subnetwork            = google_compute_subnetwork.subnet[2].id
+  depends_on = [
+    google_compute_target_https_proxy.target_proxy,
+    google_compute_network.vpc_network,
+    google_compute_subnetwork.subnet
+  ]
 }

@@ -20,6 +20,8 @@ variable "vpc" {
     subnets = map(object({
       subnet_name = string
       cidr_range  = string
+      purpose     = optional(string, "PRIVATE_RFC_1918")
+      role        = optional(string, "ACTIVE")
     }))
 
     vpc_connector = object({
@@ -100,33 +102,27 @@ variable "vpc" {
   }))
 }
 
-variable "vm-properties" {
-  description = "Configurations for VMs"
+variable "webapp_instance_template_properties" {
   type = map(object({
-    name                = string
-    machine_type        = string
-    zone                = string
-    can_ip_forward      = bool
-    deletion_protection = bool
-    enable_display      = bool
-    tags                = list(string)
-
-    boot_disk = object({
-      auto_delete = bool
-      device_name = string
-      mode        = string
-
-      initialize_params = object({
-        image = string
-        size  = number
-        type  = string
-      })
-    })
+    name           = string
+    description    = string
+    region         = string
+    machine_type   = string
+    can_ip_forward = bool
+    tags           = list(string)
 
     labels = object({
-      goog-ec-src = string
+      environment = string
     })
 
+    disk = object({
+      auto_delete  = bool
+      device_name  = string
+      mode         = string
+      source_image = string
+      disk_type    = string
+      disk_size_gb = number
+    })
 
     network_interface = map(object({
       access_config = object({
@@ -162,7 +158,6 @@ variable "vm-properties" {
       ttl             = number
       rrdatas         = optional(list(string), [])
     }))
-
   }))
 }
 
@@ -233,4 +228,114 @@ variable "cloud_function_properties" {
       retry_policy   = string
     })
   }))
+}
+
+##### A8 #####
+variable "pool_name" {
+  type = string
+}
+
+variable "health_check" {
+  type = map(object({
+    name                = string
+    description         = string
+    timeout_sec         = number
+    check_interval_sec  = number
+    healthy_threshold   = number
+    unhealthy_threshold = number
+
+    http_health_check = object({
+      port         = string
+      request_path = string
+      proxy_header = string
+    })
+  }))
+}
+
+variable "group_manager" {
+  type = map(object({
+    name                      = string
+    base_instance_name        = string
+    region                    = string
+    distribution_policy_zones = list(string)
+    target_size               = number
+
+    named_port = object({
+      name = string
+      port = number
+    })
+
+    auto_healing_policies = object({
+      initial_delay_sec = number
+    })
+  }))
+}
+
+variable "autoscaler" {
+  type = map(object({
+    name   = string
+    region = string
+
+    autoscaling_policy = object({
+      max_replicas    = number
+      min_replicas    = number
+      cooldown_period = number
+
+      cpu_utilization = object({
+        target = number
+      })
+    })
+  }))
+}
+
+variable "target_proxy_name" {
+  type = string
+}
+
+variable "ssl_cert_name" {
+  type = string
+}
+
+variable "ssl_domain" {
+  type = list(string)
+}
+
+variable "url_mapper" {
+  type = string
+}
+
+variable "backend_service" {
+  type = map(object({
+    name                  = string
+    port_name             = string
+    protocol              = string
+    load_balancing_scheme = string
+    locality_lb_policy    = string
+
+    backend = object({
+      balancing_mode  = string
+      capacity_scaler = number
+      max_utilization = number
+    })
+
+    log_config = object({
+      enable = bool
+    })
+  }))
+}
+
+variable "ext_lb_name" {
+  type = string
+}
+
+variable "ext_lb_ip_protocol" {
+  type = string
+}
+
+variable "ext_lb_scheme" {
+  type = string
+}
+
+variable "ext_lb_port_range" {
+  type = string
 }
