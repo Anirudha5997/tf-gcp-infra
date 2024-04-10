@@ -5,6 +5,13 @@ resource "random_password" "password" {
   min_lower = 7
 }
 
+resource "random_password" "name" {
+  length    = 7
+  special   = false
+  min_upper = 2
+  min_lower = 4
+}
+
 resource "google_compute_network" "vpc_network" {
   for_each                        = var.vpc
   name                            = each.value.vpc_name
@@ -192,10 +199,13 @@ resource "google_sql_database_instance" "postgresInstance" {
     ]) : idx => config
   }
 
-  name                = each.value.name
-  database_version    = each.value.database_version
-  depends_on          = [google_service_networking_connection.private_vpc_connection]
+  name             = each.value.name
+  database_version = each.value.database_version
+  depends_on = [
+    google_service_networking_connection.private_vpc_connection,
+  ]
   deletion_protection = each.value.deletion_protection
+  encryption_key_name = google_kms_crypto_key.cloudsql_keys.id
 
   dynamic "settings" {
     for_each = tolist([each.value.settings])
@@ -320,13 +330,22 @@ resource "google_pubsub_subscription" "pull_sub" {
   enable_message_ordering = each.value.enable_message_ordering
 }
 
-data "google_storage_bucket" "cloud_bucket" {
-  name = var.cloud_bucket_name
+resource "google_storage_bucket" "cloud_bucket" {
+  name                     = var.cloud_bucket_name
+  location                 = var.cloud_bucket_location
+  force_destroy            = var.cloud_bucket_force_destroy
+  public_access_prevention = var.cloud_bucket_public_access_prevention
+  depends_on               = [google_kms_crypto_key_iam_binding.bucket_key_bind]
+  encryption {
+    default_kms_key_name = google_kms_crypto_key.bucket_keys.id
+  }
 }
 
-data "google_storage_bucket_object" "archive" {
-  name   = var.archive_name
-  bucket = data.google_storage_bucket.cloud_bucket.name
+resource "google_storage_bucket_object" "bucket_object" {
+  name       = var.cloud_bucket_object_name                     # folder name should end with '/'
+  source     = "${path.module}/${var.cloud_bucket_object_name}" # content is ignored but should be non-empty
+  bucket     = google_storage_bucket.cloud_bucket.name
+  depends_on = [google_storage_bucket.cloud_bucket]
 }
 
 resource "google_cloudfunctions2_function" "function" {
@@ -334,7 +353,7 @@ resource "google_cloudfunctions2_function" "function" {
   name        = each.value.name
   location    = each.value.location
   description = each.value.description
-  depends_on  = [google_service_account.service_account, google_sql_database_instance.postgresInstance, google_sql_database.postgres, random_password.password, google_sql_user.user]
+  depends_on  = [google_service_account.service_account, google_sql_database_instance.postgresInstance, google_sql_database.postgres, random_password.password, google_sql_user.user, google_storage_bucket.cloud_bucket, google_storage_bucket_object.bucket_object]
 
   dynamic "build_config" {
     for_each = tolist([each.value.build_config])
@@ -343,8 +362,8 @@ resource "google_cloudfunctions2_function" "function" {
       entry_point = build_config.value.entry_point #check correct entry point
       source {
         storage_source {
-          bucket = data.google_storage_bucket.cloud_bucket.name
-          object = data.google_storage_bucket_object.archive.name
+          bucket = google_storage_bucket.cloud_bucket.name
+          object = google_storage_bucket_object.bucket_object.name
         }
       }
     }
@@ -374,17 +393,6 @@ resource "google_cloudfunctions2_function" "function" {
       pubsub_topic   = google_pubsub_topic.topic_tf.id
       retry_policy   = event_trigger.value.retry_policy
     }
-  }
-}
-
-locals {
-  timestamp_value = formatdate("YYYYMMDDhhmmss", timestamp())
-  cloud_function_environmental_variables = {
-    HOST     = google_sql_database_instance.postgresInstance[0].ip_address[0].ip_address
-    DATABASE = google_sql_database.postgres[0].name
-    PASSWORD = random_password.password.result
-    PGUSER   = google_sql_user.user[0].name
-    DBPORT   = 5432
   }
 }
 
@@ -427,7 +435,8 @@ resource "google_compute_region_instance_template" "webapp_instance_template" {
     google_sql_database_instance.postgresInstance,
     google_sql_database.postgres,
     google_sql_user.user,
-    google_service_account.service_account
+    google_service_account.service_account,
+    google_kms_crypto_key.template_keys
   ]
   metadata = {
     startup-script = <<-EOT
@@ -451,6 +460,9 @@ resource "google_compute_region_instance_template" "webapp_instance_template" {
       source_image = disk.value.source_image
       disk_type    = disk.value.disk_type
       disk_size_gb = disk.value.disk_size_gb
+      disk_encryption_key {
+        kms_key_self_link = google_kms_crypto_key.template_keys.id
+      }
     }
   }
 
@@ -519,10 +531,10 @@ resource "google_compute_health_check" "health_check" {
   }
 }
 
-resource "google_compute_target_pool" "target_pool" {
-  name    = var.pool_name
-  project = var.project_id
-}
+# resource "google_compute_target_pool" "target_pool" {
+#   name    = var.pool_name
+#   project = var.project_id
+# }
 resource "google_compute_region_instance_group_manager" "group_manager" {
   for_each                  = var.group_manager
   name                      = each.value.name
@@ -531,7 +543,7 @@ resource "google_compute_region_instance_group_manager" "group_manager" {
   distribution_policy_zones = each.value.distribution_policy_zones
   depends_on = [
     google_compute_region_instance_template.webapp_instance_template,
-    google_compute_target_pool.target_pool,
+    # google_compute_target_pool.target_pool,
     google_compute_health_check.health_check
   ]
 
@@ -545,8 +557,8 @@ resource "google_compute_region_instance_group_manager" "group_manager" {
     }
   }
 
-  target_pools = [google_compute_target_pool.target_pool.id]
-  target_size  = each.value.target_size
+  # target_pools = [google_compute_target_pool.target_pool.id]
+  # target_size  = each.value.target_size
 
   dynamic "named_port" {
     for_each = tolist([each.value.named_port])
@@ -659,5 +671,124 @@ resource "google_compute_global_forwarding_rule" "google_compute_forwarding_rule
     google_compute_target_https_proxy.target_proxy,
     google_compute_network.vpc_network,
     google_compute_subnetwork.subnet
+  ]
+}
+
+locals {
+  timestamp_value = formatdate("YYYYMMDDhhmmss", timestamp())
+  key_rotation    = 86400
+  cloud_function_environmental_variables = {
+    HOST     = google_sql_database_instance.postgresInstance[0].ip_address[0].ip_address
+    DATABASE = google_sql_database.postgres[0].name
+    PASSWORD = random_password.password.result
+    PGUSER   = google_sql_user.user[0].name
+    DBPORT   = 5432
+  }
+
+  secret_manager = {
+    startup_script       = data.template_file.init.rendered
+    kms                  = "${google_kms_key_ring.keyring.name}\n${google_kms_crypto_key.template_keys.name}"
+    vm_props             = var.template_properties_cd
+    webapp_template_name = "webapp-v2${local.timestamp_value}"
+  }
+}
+
+resource "google_kms_key_ring" "keyring" {
+  name     = "WEBAPP_KEYRING_V3_-${local.timestamp_value}"
+  location = "us-east1"
+}
+
+resource "google_kms_crypto_key" "template_keys" {
+  name            = "cryptokey-webapp-${local.timestamp_value}"
+  key_ring        = google_kms_key_ring.keyring.id
+  rotation_period = "${30 * local.key_rotation}s"
+}
+
+resource "google_kms_crypto_key" "cloudsql_keys" {
+  name            = "cryptokey-cloudsql-${local.timestamp_value}"
+  key_ring        = google_kms_key_ring.keyring.id
+  rotation_period = "${30 * local.key_rotation}s"
+}
+
+resource "google_kms_crypto_key" "bucket_keys" {
+  name            = "cryptokey-bucket-${local.timestamp_value}"
+  key_ring        = google_kms_key_ring.keyring.id
+  rotation_period = "${30 * local.key_rotation}s"
+}
+
+resource "google_kms_crypto_key_iam_binding" "vm_key_bind" {
+  provider      = google-beta
+  crypto_key_id = google_kms_crypto_key.template_keys.id
+  # role          = "roles/owner"
+  role = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  depends_on = [
+    google_kms_key_ring.keyring,
+    google_kms_crypto_key.template_keys
+  ]
+  members = ["serviceAccount:service-628977860635@compute-system.iam.gserviceaccount.com"]
+}
+
+resource "google_project_service_identity" "cloudsql_email" {
+  provider = google-beta
+  project  = var.project_id
+  service  = "sqladmin.googleapis.com"
+}
+
+resource "google_kms_crypto_key_iam_binding" "cloudsql_key_bind" {
+  provider      = google-beta
+  crypto_key_id = google_kms_crypto_key.cloudsql_keys.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  depends_on = [
+    google_kms_key_ring.keyring,
+    google_kms_crypto_key.cloudsql_keys,
+    google_project_service_identity.cloudsql_email
+  ]
+  members = ["serviceAccount:${google_project_service_identity.cloudsql_email.email}"]
+}
+
+resource "google_kms_crypto_key_iam_binding" "bucket_key_bind" {
+  provider      = google-beta
+  crypto_key_id = google_kms_crypto_key.bucket_keys.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  depends_on = [
+    google_kms_key_ring.keyring,
+    google_kms_crypto_key.bucket_keys,
+  ]
+  members = ["serviceAccount:service-628977860635@gs-project-accounts.iam.gserviceaccount.com"]
+}
+
+resource "google_secret_manager_secret" "secret-basic" {
+  for_each  = local.secret_manager
+  secret_id = each.key
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "secret-version-basic" {
+  for_each    = local.secret_manager
+  secret      = google_secret_manager_secret.secret-basic[each.key].id
+  secret_data = each.value
+}
+
+data "template_file" "init" {
+  template = file("${path.module}/init.sh")
+  vars = {
+    GCP_PROJECT_ID = var.project_id
+    GCP_TOPIC      = google_pubsub_topic.topic_tf.name
+    HOST           = google_sql_database_instance.postgresInstance[0].ip_address[0].ip_address
+    DATABASE       = google_sql_database.postgres[0].name
+    PASSWORD       = random_password.password.result
+    PGUSER         = google_sql_user.user[0].name
+    DBPORT         = 5432
+    # could have used data in a single line
+  }
+
+  depends_on = [
+    google_sql_database_instance.postgresInstance,
+    google_pubsub_topic.topic_tf,
+    random_password.password,
+    google_sql_user.user,
+    google_sql_database.postgres
   ]
 }

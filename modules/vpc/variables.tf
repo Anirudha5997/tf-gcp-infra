@@ -174,11 +174,24 @@ variable "service_accounts_properties" {
   }))
 }
 
+
 variable "cloud_bucket_name" {
   type = string
 }
 
-variable "archive_name" {
+variable "cloud_bucket_location" {
+  type = string
+}
+
+variable "cloud_bucket_force_destroy" {
+  type = bool
+}
+
+variable "cloud_bucket_public_access_prevention" {
+  type = string
+}
+
+variable "cloud_bucket_object_name" {
   type = string
 }
 
@@ -337,5 +350,9 @@ variable "ext_lb_scheme" {
 }
 
 variable "ext_lb_port_range" {
+  type = string
+}
+
+variable "template_properties_cd" {
   type = string
 }
